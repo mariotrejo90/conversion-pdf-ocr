@@ -3,6 +3,16 @@
 
 Hay una herramienta local de OCR: `ocr-expediente` (usa Tesseract en esta máquina; nada se envía a internet).
 
+### Entorno (dónde está y qué hacer si falla)
+- Comando: `~/.local/bin/ocr-expediente` (instalado por `install.sh`). Si el shell no lo encuentra, prueba con la ruta completa.
+- Repositorio: github.com/mariotrejo90/conversion-pdf-ocr (clon local esperado: `~/conversion-pdf-ocr`). Contiene el script `ocr-expediente`, `install.sh` y estas reglas.
+- Dependencias: `ocrmypdf`, `tesseract` con el idioma `spa` y `poppler` (`pdftotext`, `pdfinfo`). En macOS suelen estar en `/opt/homebrew/bin`; si no aparecen, ejecuta antes `export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"`.
+- Comprobación rápida: `ocr-expediente --help`, `command -v ocrmypdf tesseract pdftotext` y `tesseract --list-langs` (debe incluir `spa`).
+- Si falta algo, **no instales ni cambies software por tu cuenta**: dile al usuario qué falta y propón el comando:
+  - Dependencias: `brew install ocrmypdf tesseract-lang poppler`
+  - Comando ausente o desactualizado: `cd ~/conversion-pdf-ocr && git pull && bash install.sh`
+- Los resultados (`NOMBRE.txt` y `NOMBRE_ocr.pdf`) quedan junto al PDF original, salvo que se indique otra carpeta con `-o`.
+
 ### Flujo
 1. **Nunca leas un PDF escaneado como imagen, página por página, ni tomes capturas de pantalla para leerlo.**
 2. Ante cualquier PDF que haya que leer, ejecuta primero `ocr-expediente ocr RUTA/archivo.pdf` (acepta carpetas). Imprime una línea por archivo (OK / OMITIDO / FALLO) con páginas, caracteres y "pág. con poco texto". OMITIDO = ya estaba procesado: úsalo.
