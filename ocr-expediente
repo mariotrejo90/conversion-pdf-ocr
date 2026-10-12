@@ -137,8 +137,9 @@ cmd_folio() {
   a="${rango%-*}"; b="${rango#*-}"
   case "$a$b" in *[!0-9]*|"") echo "Rango inválido: $rango (use N o N-M)" >&2; exit 1 ;; esac
   awk -v a="$a" -v b="$b" '
-    /^=== Folio [0-9]+ ===$/ { f=$3+0 }
-    f>=a && f<=b { print }
+    /^=== Folio [0-9]+ ===$/ { f=$3+0; total=f }
+    f>=a && f<=b { print; n++ }
+    END { if (!n) printf "SIN RESULTADO: no hay folios %s-%s en este texto (tiene %d folios).\n", a, b, total }
   ' "$txt"
 }
 
@@ -148,7 +149,8 @@ cmd_buscar() {
   [ -f "$txt" ] || { echo "No existe: $txt" >&2; exit 1; }
   awk -v p="$patron" '
     /^=== Folio [0-9]+ ===$/ { f=$3; next }
-    index(tolower($0), tolower(p)) { gsub(/^[ \t]+/, ""); printf "Folio %s: %s\n", f, $0 }
+    index(tolower($0), tolower(p)) { gsub(/^[ \t]+/, ""); printf "Folio %s: %s\n", f, $0; n++ }
+    END { if (!n) printf "SIN COINCIDENCIAS para \"%s\". Esto NO prueba que el dato no esté: el OCR pudo leerlo distinto. Pruebe otra grafía o revise la imagen.\n", p }
   ' "$txt"
 }
 
@@ -158,7 +160,7 @@ cmd_comparar() {
   [ -f "$a" ] && [ -f "$b" ] || { echo "Alguno de los archivos no existe" >&2; exit 1; }
   local tmp; tmp="$(mktemp)"
   diff -u -b -B "$a" "$b" > "$tmp"
-  if [ ! -s "$tmp" ]; then echo "Sin diferencias (ignorando espacios y líneas en blanco)."; rm -f "$tmp"; return 0; fi
+  if [ ! -s "$tmp" ]; then echo "Sin diferencias (solo se ignora la CANTIDAD de espacios y las líneas en blanco; un espacio que falta o sobra dentro de una cifra sí cuenta)."; rm -f "$tmp"; return 0; fi
   local total; total="$(wc -l < "$tmp" | tr -d ' ')"
   head -n "$max" "$tmp"
   [ "$total" -gt "$max" ] && echo "... (${total} líneas de diferencias; mostradas ${max}. Pase un tercer argumento mayor para ver más.)"
