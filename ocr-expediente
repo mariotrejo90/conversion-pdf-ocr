@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# ocr-expediente — OCR local (Tesseract/OCRmyPDF) pensado para que lo ejecute cualquier agente de IA.
+# Nada sale de la máquina. Salida mínima a propósito, para gastar pocos tokens.
+# Compatible con bash 3.2 (macOS).
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+
+uso() {
+  cat <<'EOF'
+Uso:
+  ocr-expediente ocr [-l idioma] [-o carpeta] [--forzar] ARCHIVO.pdf|CARPETA ...
+      Hace OCR (idioma por defecto: spa) y deja junto al original:
+        NOMBRE_ocr.pdf   PDF con capa de texto (el original no se toca)
+        NOMBRE.txt       texto con marcas "=== Folio N ===" por página
+      Imprime UNA línea por archivo. Si ya fue procesado, lo omite (usa --forzar para rehacerlo).
+
+  ocr-expediente folio ARCHIVO.txt N[-M]
+      Muestra solo los folios pedidos (para leer lo mínimo).
+
+  ocr-expediente buscar ARCHIVO.txt "texto"
+      Busca (sin distinguir mayúsculas) y muestra el folio donde aparece cada coincidencia.
+
+  ocr-expediente comparar A.txt B.txt [MAX_LINEAS]
+      Muestra solo las diferencias entre dos textos (por defecto máx. 200 líneas).
+EOF
+}
+
+falta() { echo "ERROR: falta '$1'. En Mac: brew install ocrmypdf tesseract-lang poppler" >&2; exit 2; }
+
+cmd_ocr() {
+  local lang="spa" outdir="" forzar=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -l) lang="$2"; shift 2 ;;
+      -o) outdir="$2"; shift 2 ;;
+      --forzar) forzar=1; shift ;;
+      --) shift; break ;;
+      -*) echo "Opción desconocida: $1" >&2; exit 1 ;;
+      *) break ;;
+    esac
+  done
+  [ $# -gt 0 ] || { uso; exit 1; }
+  for p in ocrmypdf tesseract pdftotext pdfinfo; do command -v "$p" >/dev/null 2>&1 || falta "$p"; done
+  tesseract --list-langs 2>/dev/null | grep -qx "${lang%%+*}" || { echo "ERROR: Tesseract no tiene el idioma '$lang'. En Mac: brew install tesseract-lang" >&2; exit 2; }
+
+  # Expande carpetas a la lista de PDFs (ignora los *_ocr.pdf ya generados)
+  local lista; lista="$(mktemp)"
+  local a
+  for a in "$@"; do
+    if [ -d "$a" ]; then
+      find "$a" -maxdepth 1 -type f \( -iname '*.pdf' \) ! -iname '*_ocr.pdf' | sort >> "$lista"
+    else
+      echo "$a" >> "$lista"
+    fi
+  done
+
+  local fallos=0 pdf
+  while IFS= read -r pdf; do
+    [ -n "$pdf" ] || continue
+    if [ ! -f "$pdf" ]; then echo "FALLO  $pdf | no existe"; fallos=$((fallos+1)); continue; fi
+    procesar_pdf "$pdf" "$lang" "$outdir" "$forzar" || fallos=$((fallos+1))
+  done < "$lista"
+  rm -f "$lista"
+  [ "$fallos" -eq 0 ]
+}
+
+# Cantidad de caracteres de texto real (sin marcas de folio ni espacios).
+texto_util() {
+  grep -v '^=== Folio [0-9]* ===$' "$1" | tr -d ' \t\r\n\f' | wc -c | tr -d ' '
+}
+
+procesar_pdf() {
+  local pdf="$1" lang="$2" outdir="$3" forzar="$4"
+  local dir base destdir pdf_ocr txt
+  dir="$(cd "$(dirname "$pdf")" && pwd)"
+  base="$(basename "$pdf")"; base="${base%.*}"
+  destdir="${outdir:-$dir}"
+  mkdir -p "$destdir"
+  txt="$destdir/$base.txt"
+  pdf_ocr="$destdir/${base}_ocr.pdf"
+
+  if [ "$forzar" -eq 0 ] && [ -s "$txt" ] && [ "$txt" -nt "$pdf" ] && [ "$(texto_util "$txt")" -ge 20 ]; then
+    echo "OMITIDO $base.pdf | ya procesado -> $txt"
+    return 0
+  fi
+
+  local log; log="$(mktemp)"
+  local n=2
+  # Nunca sobrescribe un _ocr.pdf distinto: si existe y no se fuerza, numera.
+  if [ -e "$pdf_ocr" ] && [ "$forzar" -eq 0 ]; then
+    while [ -e "$destdir/${base}_ocr_$n.pdf" ]; do n=$((n+1)); done
+    pdf_ocr="$destdir/${base}_ocr_$n.pdf"
+  fi
+
+  local fuente="$pdf_ocr" nota=""
+  if ocrmypdf -q -l "$lang" --rotate-pages --deskew --skip-text --output-type pdf "$pdf" "$pdf_ocr" >"$log" 2>&1; then
+    :
+  else
+    # PDF firmado/cifrado/corrupto: no se fuerza nada; se lee el texto digital del original si lo hay.
+    fuente="$pdf"; nota=" (OCR no aplicado: $(grep -m1 -iE 'error|signature|encrypted' "$log" | cut -c1-120))"
+    rm -f "$pdf_ocr"; pdf_ocr="-"
+  fi
+  rm -f "$log"
+
+  local paginas
+  paginas="$(pdfinfo "$fuente" 2>/dev/null | awk '/^Pages:/{print $2}')"
+  [ -n "$paginas" ] || { echo "FALLO  $base.pdf | no se pudo leer el PDF"; return 1; }
+
+  pdftotext -layout "$fuente" - 2>/dev/null | awk -v n="$paginas" '
+    BEGIN { RS="\f"; ORS="" }
+    NR<=n { printf "=== Folio %d ===\n%s\n", NR, $0 }
+  ' > "$txt"
+
+  local chars dudosas util
+  # Texto realmente útil: sin marcas de folio ni espacios. Si no hay nada, es un fallo, no un "OK".
+  util="$(texto_util "$txt")"
+  if [ "${util:-0}" -lt 20 ]; then
+    rm -f "$txt"
+    echo "FALLO  $base.pdf | $paginas pág | no se obtuvo texto${nota:- (revise que el PDF sea legible)}"
+    return 1
+  fi
+  chars="$(wc -m < "$txt" | tr -d ' ')"
+  # Páginas con casi nada de texto: candidatas a revisión visual (sellos, manuscritos, páginas en blanco)
+  dudosas="$(awk '
+    /^=== Folio [0-9]+ ===$/ { if (f) { if (c<30) printf "%s%d", (s++?",":""), f }; f=$3; c=0; next }
+    { gsub(/[ \t\r\n]/,""); c+=length($0) }
+    END { if (f && c<30) printf "%s%d", (s++?",":""), f }
+  ' "$txt")"
+
+  echo "OK     $base.pdf | $paginas pág | $chars caracteres | pág. con poco texto: ${dudosas:-ninguna} | $txt$nota"
+}
+
+cmd_folio() {
+  [ $# -eq 2 ] || { uso; exit 1; }
+  local txt="$1" rango="$2" a b
+  [ -f "$txt" ] || { echo "No existe: $txt" >&2; exit 1; }
+  a="${rango%-*}"; b="${rango#*-}"
+  case "$a$b" in *[!0-9]*|"") echo "Rango inválido: $rango (use N o N-M)" >&2; exit 1 ;; esac
+  awk -v a="$a" -v b="$b" '
+    /^=== Folio [0-9]+ ===$/ { f=$3+0 }
+    f>=a && f<=b { print }
+  ' "$txt"
+}
+
+cmd_buscar() {
+  [ $# -eq 2 ] || { uso; exit 1; }
+  local txt="$1" patron="$2"
+  [ -f "$txt" ] || { echo "No existe: $txt" >&2; exit 1; }
+  awk -v p="$patron" '
+    /^=== Folio [0-9]+ ===$/ { f=$3; next }
+    index(tolower($0), tolower(p)) { gsub(/^[ \t]+/, ""); printf "Folio %s: %s\n", f, $0 }
+  ' "$txt"
+}
+
+cmd_comparar() {
+  [ $# -ge 2 ] || { uso; exit 1; }
+  local a="$1" b="$2" max="${3:-200}"
+  [ -f "$a" ] && [ -f "$b" ] || { echo "Alguno de los archivos no existe" >&2; exit 1; }
+  local tmp; tmp="$(mktemp)"
+  diff -u -b -B "$a" "$b" > "$tmp"
+  if [ ! -s "$tmp" ]; then echo "Sin diferencias (ignorando espacios y líneas en blanco)."; rm -f "$tmp"; return 0; fi
+  local total; total="$(wc -l < "$tmp" | tr -d ' ')"
+  head -n "$max" "$tmp"
+  [ "$total" -gt "$max" ] && echo "... (${total} líneas de diferencias; mostradas ${max}. Pase un tercer argumento mayor para ver más.)"
+  rm -f "$tmp"
+}
+
+case "${1:-}" in
+  ocr)      shift; cmd_ocr "$@" ;;
+  folio)    shift; cmd_folio "$@" ;;
+  buscar)   shift; cmd_buscar "$@" ;;
+  comparar) shift; cmd_comparar "$@" ;;
+  -h|--help|help|"") uso ;;
+  *) echo "Subcomando desconocido: $1" >&2; uso; exit 1 ;;
+esac
