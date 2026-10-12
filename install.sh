@@ -35,7 +35,12 @@ if [ "${1:-}" = "--agentes" ]; then
   CM="$HOME/.claude/CLAUDE.md"
   mkdir -p "$HOME/.claude"
   if grep -qs 'ocr-expediente:inicio' "$CM"; then
-    echo "Las reglas ya estaban en $CM (no se duplican)."
+    # Reemplaza solo el bloque anterior (entre las marcas); el resto del archivo no se toca.
+    TMP="$(mktemp)"
+    awk '/<!-- ocr-expediente:inicio -->/{skip=1} !skip{print} /<!-- ocr-expediente:fin -->/{skip=0}' "$CM" > "$TMP"
+    cat "$TMP" > "$CM"
+    { echo; cat "$AQUI/AGENTS.md"; } >> "$CM"
+    echo "Reglas actualizadas en $CM"
   else
     { echo; cat "$AQUI/AGENTS.md"; } >> "$CM"
     echo "Reglas agregadas a $CM"
